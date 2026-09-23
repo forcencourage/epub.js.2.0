@@ -5767,6 +5767,55 @@ class default_DefaultViewManager {
   //
   // };
 
+    /**
+   * NEW: Whether the current section has another column visible
+   * without needing to load the next spine item.
+   * @return {boolean}
+   */
+  canAdvanceColumn() {
+    if (!this.views.length || !this.isPaginated) return false;
+    let dir = this.settings.direction;
+
+    if (this.settings.axis === "horizontal" && (!dir || dir === "ltr")) {
+      let left = this.container.scrollLeft + this.container.offsetWidth + this.layout.delta;
+      return left <= this.container.scrollWidth;
+    }
+
+    if (this.settings.axis === "horizontal" && dir === "rtl") {
+      if (this.settings.rtlScrollType === "default") {
+        return this.container.scrollLeft > 0;
+      } else {
+        let left = this.container.scrollLeft + this.layout.delta * -1;
+        return left > this.container.scrollWidth * -1;
+      }
+    }
+
+    if (this.settings.axis === "vertical") {
+      let top = this.container.scrollTop + this.container.offsetHeight;
+      return top < this.container.scrollHeight;
+    }
+
+    return false;
+  }
+
+  /**
+   * NEW: Shift to the next column WITHOUT falling back to loading
+   * the next section. Returns false (and does nothing) if the
+   * current section has no more columns — that's the cross-chapter
+   * case, which this feature intentionally does not handle.
+   * @return {boolean} whether the shift happened
+   */
+  advanceColumn() {
+    if (!this.canAdvanceColumn()) return false;
+
+    if (this.settings.axis === "vertical") {
+      this.scrollBy(0, this.layout.height, true);
+    } else {
+      this.scrollBy(this.layout.delta, 0, true);
+    }
+
+    return true;
+  }
 
   next() {
     var next;
@@ -7428,6 +7477,7 @@ class Contents {
 
     this.addEventListeners();
     this.addSelectionListeners(); // this.transitionListeners();
+    this.addEdgeDragListeners(); // NEW: auto-advance page on drag-to-edge
 
     if (typeof ResizeObserver === "undefined") {
       this.resizeListeners();
@@ -7448,6 +7498,7 @@ class Contents {
   removeListeners() {
     this.removeEventListeners();
     this.removeSelectionListeners();
+    this.removeEdgeDragListeners(); // NEW
 
     if (this.observer) {
       this.observer.disconnect();
@@ -8042,6 +8093,102 @@ class Contents {
       }
     }
   }
+
+    /**
+   * NEW: Listen for mouse drag activity so we can auto-advance
+   * the page when the pointer nears the trailing edge while
+   * a selection is in progress.
+   * @private
+   */
+  addEdgeDragListeners() {
+    if (!this.document) return;
+
+    this._dragging = false;
+    this._autoAdvancing = false;
+
+    this._onEdgeMouseDown = () => { this._dragging = true; };
+    this._onEdgeMouseUp = () => { this._dragging = false; };
+    this._onEdgeMouseMove = this.checkEdgeAutoAdvance.bind(this);
+
+    this.document.addEventListener("mousedown", this._onEdgeMouseDown);
+    this.document.addEventListener("mouseup", this._onEdgeMouseUp);
+    this.document.addEventListener("mousemove", this._onEdgeMouseMove);
+    // Touch support (basic)
+    this.document.addEventListener("touchstart", this._onEdgeMouseDown);
+    this.document.addEventListener("touchend", this._onEdgeMouseUp);
+  }
+
+  /**
+   * NEW: Remove edge-drag listeners
+   * @private
+   */
+  removeEdgeDragListeners() {
+    if (!this.document) return;
+
+    this.document.removeEventListener("mousedown", this._onEdgeMouseDown);
+    this.document.removeEventListener("mouseup", this._onEdgeMouseUp);
+    this.document.removeEventListener("mousemove", this._onEdgeMouseMove);
+    this.document.removeEventListener("touchstart", this._onEdgeMouseDown);
+    this.document.removeEventListener("touchend", this._onEdgeMouseUp);
+
+    this._onEdgeMouseDown = undefined;
+    this._onEdgeMouseUp = undefined;
+    this._onEdgeMouseMove = undefined;
+  }
+
+  /**
+   * NEW: Called on mousemove while a selection drag is active.
+   * If the pointer is near the trailing edge of the visible column,
+   * ask the Rendition/Manager to shift to the next column, then
+   * restore the in-progress selection (same document, so the DOM
+   * nodes are still valid — only their visual offset changed).
+   * @private
+   */
+  checkEdgeAutoAdvance(event) {
+    if (!this._dragging || this._autoAdvancing || !this.window) return;
+
+    const threshold = 24; // px from the right edge
+    const clientX = event.touches ? event.touches[0].clientX : event.clientX;
+    if (typeof clientX !== "number") return;
+
+    const atTrailingEdge = clientX > (this.window.innerWidth - threshold);
+    if (!atTrailingEdge) return;
+
+    const sel = this.window.getSelection();
+    if (!sel || sel.rangeCount === 0) return;
+
+    // Save the live selection endpoints before triggering the page shift
+    const anchorNode = sel.anchorNode;
+    const anchorOffset = sel.anchorOffset;
+    const focusNode = sel.focusNode;
+    const focusOffset = sel.focusOffset;
+
+    this._autoAdvancing = true;
+
+    // Let the Rendition/Manager decide whether a column shift is possible
+    // (it will refuse if this would cross a section/chapter boundary).
+    this.emit("selection:edge", { direction: "next" });
+
+    // Give the manager's scroll/transform a tick to apply, then
+    // re-establish the selection range from the saved endpoints.
+    setTimeout(() => {
+      try {
+        const sel2 = this.window.getSelection();
+        sel2.removeAllRanges();
+        const r = this.document.createRange();
+        r.setStart(anchorNode, anchorOffset);
+        r.collapse(true);
+        sel2.addRange(r);
+        if (sel2.extend) {
+          sel2.extend(focusNode, focusOffset);
+        }
+      } catch (e) {
+        console.warn("epub.js: could not restore selection after edge-advance", e);
+      }
+      this._autoAdvancing = false;
+    }, 60);
+  }
+
   /**
    * Get a Dom Range from EpubCFI
    * @param {EpubCFI} _cfi
@@ -10583,7 +10730,21 @@ class rendition_Rendition {
       contents.on(e, ev => this.triggerViewEvent(ev, contents));
     });
     contents.on(constants["c" /* EVENTS */].CONTENTS.SELECTED, e => this.triggerSelectedEvent(e, contents));
+    contents.on("selection:edge", data => this.handleSelectionEdge(data, contents)); // NEW
   }
+
+  /**
+   * NEW: Handle a request from Contents to advance one column
+   * because a drag-selection has reached the trailing edge.
+   * @private
+   */
+  handleSelectionEdge(data, contents) {
+    if (!this.manager || typeof this.manager.advanceColumn !== "function") {
+      return;
+    }
+    this.manager.advanceColumn();
+  }
+  
   /**
    * Emit events passed by a view
    * @private
