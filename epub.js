@@ -8094,104 +8094,189 @@ class Contents {
     }
   }
 
-    /**
-   * NEW: Listen for mouse drag activity so we can auto-advance
-   * the page when the pointer nears the trailing edge while
-   * a selection is in progress.
-   * @private
-   */
-  addEdgeDragListeners() {
-    if (!this.document) return;
-
-    this._dragging = false;
-    this._autoAdvancing = false;
-
-    this._onEdgeMouseDown = () => { this._dragging = true; };
-    this._onEdgeMouseUp = () => { this._dragging = false; };
-    this._onEdgeMouseMove = this.checkEdgeAutoAdvance.bind(this);
-
-    this.document.addEventListener("mousedown", this._onEdgeMouseDown);
-    this.document.addEventListener("mouseup", this._onEdgeMouseUp);
-    this.document.addEventListener("mousemove", this._onEdgeMouseMove);
-    // Touch support (basic)
-    this.document.addEventListener("touchstart", this._onEdgeMouseDown);
-    this.document.addEventListener("touchend", this._onEdgeMouseUp);
-  }
-
   /**
-   * NEW: Remove edge-drag listeners
-   * @private
-   */
-  removeEdgeDragListeners() {
-    if (!this.document) return;
+ * Listen for mouse drag activity so we can auto-advance the page
+ * when the pointer nears the trailing edge while a selection is
+ * in progress.
+ * @private
+ */
+addEdgeDragListeners() {
+  if (!this.document) return;
 
-    this.document.removeEventListener("mousedown", this._onEdgeMouseDown);
-    this.document.removeEventListener("mouseup", this._onEdgeMouseUp);
-    this.document.removeEventListener("mousemove", this._onEdgeMouseMove);
-    this.document.removeEventListener("touchstart", this._onEdgeMouseDown);
-    this.document.removeEventListener("touchend", this._onEdgeMouseUp);
+  this._dragging = false;
+  this._autoAdvancing = false;
+  this._edgeAdvanceInterval = undefined;
+  this._lastPointer = { x: 0, y: 0 };
 
-    this._onEdgeMouseDown = undefined;
-    this._onEdgeMouseUp = undefined;
-    this._onEdgeMouseMove = undefined;
+  this._onEdgeMouseDown = (e) => {
+    this._dragging = true;
+    this._updatePointer(e);
+  };
+  this._onEdgeMouseUp = () => {
+    this._dragging = false;
+    this._stopEdgeAdvanceLoop();
+  };
+  this._onEdgeMouseMove = (e) => {
+    this._updatePointer(e);
+    this.checkEdgeAutoAdvance();
+  };
+
+  this.document.addEventListener("mousedown", this._onEdgeMouseDown);
+  this.document.addEventListener("mouseup", this._onEdgeMouseUp);
+  this.document.addEventListener("mousemove", this._onEdgeMouseMove);
+  // Touch support (basic)
+  this.document.addEventListener("touchstart", this._onEdgeMouseDown);
+  this.document.addEventListener("touchend", this._onEdgeMouseUp);
+  this.document.addEventListener("touchmove", this._onEdgeMouseMove);
+}
+
+/**
+ * Remove edge-drag listeners
+ * @private
+ */
+removeEdgeDragListeners() {
+  if (!this.document) return;
+
+  this._stopEdgeAdvanceLoop();
+
+  this.document.removeEventListener("mousedown", this._onEdgeMouseDown);
+  this.document.removeEventListener("mouseup", this._onEdgeMouseUp);
+  this.document.removeEventListener("mousemove", this._onEdgeMouseMove);
+  this.document.removeEventListener("touchstart", this._onEdgeMouseDown);
+  this.document.removeEventListener("touchend", this._onEdgeMouseUp);
+  this.document.removeEventListener("touchmove", this._onEdgeMouseMove);
+
+  this._onEdgeMouseDown = undefined;
+  this._onEdgeMouseUp = undefined;
+  this._onEdgeMouseMove = undefined;
+}
+
+/**
+ * Track the latest known pointer position, from either a mouse
+ * or touch event.
+ * @private
+ */
+_updatePointer(event) {
+  const point = event.touches ? event.touches[0] : event;
+  if (point && typeof point.clientX === "number") {
+    this._lastPointer = { x: point.clientX, y: point.clientY };
+  }
+}
+
+/**
+ * Called while a selection drag is active and the pointer is near
+ * the trailing edge of the page. With single-column-per-page
+ * pagination, text flows top-to-bottom within the visible column,
+ * so the point where the next page's content should be pulled in
+ * is the BOTTOM of the viewport; the right edge only matters if
+ * columnWidth is narrower than the viewport (a two-up/custom spread).
+ * @private
+ */
+checkEdgeAutoAdvance() {
+  if (!this._dragging || !this.window) return;
+
+  const threshold = 24; // px from the edge
+  const { x: clientX, y: clientY } = this._lastPointer;
+  if (typeof clientY !== "number") return;
+
+  const atBottomEdge = clientY > (this.window.innerHeight - threshold);
+  const atRightEdge = typeof clientX === "number" &&
+    clientX > (this.window.innerWidth - threshold);
+
+  if (!atBottomEdge && !atRightEdge) {
+    this._stopEdgeAdvanceLoop();
+    return;
   }
 
-    /**
-   * FIXED: Called on mousemove while a selection drag is active.
-   * With standard single-column-per-page pagination, text flows
-   * top-to-bottom within the visible column, so the point where
-   * the next page's content should be pulled in is the BOTTOM
-   * of the viewport, not the right edge — the right edge is only
-   * relevant if columnWidth < viewport width (a rare/custom setup).
-   * @private
-   */
-  checkEdgeAutoAdvance(event) {
-    if (!this._dragging || this._autoAdvancing || !this.window) return;
+  this._startEdgeAdvanceLoop();
+}
 
-    const threshold = 24; // px from the edge
-    const clientX = event.touches ? event.touches[0].clientX : event.clientX;
-    const clientY = event.touches ? event.touches[0].clientY : event.clientY;
-    if (typeof clientY !== "number") return;
+/**
+ * Begin (or continue) the repeating advance while the pointer
+ * remains near the edge, so holding still at the bottom of the
+ * page still keeps pulling in new pages/text.
+ * @private
+ */
+_startEdgeAdvanceLoop() {
+  if (this._edgeAdvanceInterval) return;
 
-    // Primary trigger: bottom of the viewport (top-to-bottom column flow)
-    const atBottomEdge = clientY > (this.window.innerHeight - threshold);
+  const tick = () => {
+    if (!this._dragging) {
+      this._stopEdgeAdvanceLoop();
+      return;
+    }
+    this._advanceSelectionEdge();
+  };
 
-    // Secondary trigger: right edge, in case columns are narrower
-    // than the full viewport (e.g. a two-up spread layout)
-    const atRightEdge = typeof clientX === "number" &&
-      clientX > (this.window.innerWidth - threshold);
+  tick();
+  this._edgeAdvanceInterval = setInterval(tick, 200);
+}
 
-    if (!atBottomEdge && !atRightEdge) return;
+/**
+ * Stop the repeating advance loop.
+ * @private
+ */
+_stopEdgeAdvanceLoop() {
+  if (this._edgeAdvanceInterval) {
+    clearInterval(this._edgeAdvanceInterval);
+    this._edgeAdvanceInterval = undefined;
+  }
+}
 
-    const sel = this.window.getSelection();
-    if (!sel || sel.rangeCount === 0) return;
+/**
+ * Advance one column/page and extend the current selection out to
+ * whatever now sits under the pointer, since the content moved but
+ * the pointer (and thus the browser's own selection tracking) did
+ * not fire a new event on its own.
+ * @private
+ */
+_advanceSelectionEdge() {
+  if (this._autoAdvancing) return;
 
-    const anchorNode = sel.anchorNode;
-    const anchorOffset = sel.anchorOffset;
-    const focusNode = sel.focusNode;
-    const focusOffset = sel.focusOffset;
+  const sel = this.window.getSelection();
+  if (!sel || sel.rangeCount === 0) return;
 
-    this._autoAdvancing = true;
+  // Keep the fixed starting point of the selection; only the
+  // focus (the end being dragged) should move.
+  const anchorNode = sel.anchorNode;
+  const anchorOffset = sel.anchorOffset;
+  const { x: clientX, y: clientY } = this._lastPointer;
 
-    this.emit("selection:edge", { direction: "next" });
+  this._autoAdvancing = true;
+  this.emit("selection:edge", { direction: "next" });
 
-    setTimeout(() => {
-      try {
-        const sel2 = this.window.getSelection();
-        sel2.removeAllRanges();
-        const r = this.document.createRange();
-        r.setStart(anchorNode, anchorOffset);
-        r.collapse(true);
-        sel2.addRange(r);
-        if (sel2.extend) {
-          sel2.extend(focusNode, focusOffset);
-        }
-      } catch (e) {
-        console.warn("epub.js: could not restore selection after edge-advance", e);
+  setTimeout(() => {
+    try {
+      const doc = this.document;
+      let focus;
+
+      if (doc.caretRangeFromPoint) {
+        const r = doc.caretRangeFromPoint(clientX, clientY);
+        if (r) focus = { node: r.startContainer, offset: r.startOffset };
+      } else if (doc.caretPositionFromPoint) {
+        const pos = doc.caretPositionFromPoint(clientX, clientY);
+        if (pos) focus = { node: pos.offsetNode, offset: pos.offset };
       }
-      this._autoAdvancing = false;
-    }, 60);
-  }
+
+      const sel2 = this.window.getSelection();
+
+      if (focus) {
+        sel2.removeAllRanges();
+        const r2 = doc.createRange();
+        r2.setStart(anchorNode, anchorOffset);
+        r2.collapse(true);
+        sel2.addRange(r2);
+
+        if (sel2.extend) {
+          sel2.extend(focus.node, focus.offset);
+        }
+      }
+    } catch (e) {
+      console.warn("epub.js: could not extend selection after edge-advance", e);
+    }
+    this._autoAdvancing = false;
+  }, 60);
+}
 
   /**
    * Get a Dom Range from EpubCFI
