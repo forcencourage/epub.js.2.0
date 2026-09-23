@@ -8128,49 +8128,6 @@ addEdgeDragListeners() {
   this.document.addEventListener("touchstart", this._onEdgeMouseDown);
   this.document.addEventListener("touchend", this._onEdgeMouseUp);
   this.document.addEventListener("touchmove", this._onEdgeMouseMove);
-
-    // ---- NEW: touch / native-handle support via selectionchange ----
-  this._mouseDown = false;
-  this._prevSelLen = 0;
-  const EDGE_TOUCH_THRESHOLD = 40; // px from the bottom of the page; tune to your padding/line-height
-
-  this._onRealMouseDown = () => { this._mouseDown = true; };
-  this._onRealMouseUp = () => { this._mouseDown = false; };
-  this.document.addEventListener("mousedown", this._onRealMouseDown);
-  this.document.addEventListener("mouseup", this._onRealMouseUp);
-
-  this._onEdgeSelectionChange = () => {
-    // Mouse dragging is handled by the existing mousemove path
-    if (this._mouseDown || this._autoAdvancing || !this.window) return;
-
-    const sel = this.window.getSelection();
-    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) {
-      this._prevSelLen = 0;
-      this._edgeArmed = true;
-      return;
-    }
-
-    const len = sel.toString().length;
-    // Ignore the first event (fresh long-press selection) and non-growing changes
-    const grew = this._prevSelLen > 0 && len > this._prevSelLen;
-    this._prevSelLen = len;
-
-    const range = sel.getRangeAt(0);
-    const rects = range.getClientRects();
-    if (!rects.length) return;
-    const last = rects[rects.length - 1]; // rect of the moving (end) side
-
-    const nearBottom = last.bottom > this.window.innerHeight - EDGE_TOUCH_THRESHOLD;
-    if (!nearBottom) {
-      this._edgeArmed = true; // re-arm once the handle leaves the edge zone
-      return;
-    }
-    if (!grew || !this._edgeArmed) return;
-
-    this._edgeArmed = false;
-    this._advanceSelectionEdgeTouch(range, last);
-  };
-  this.document.addEventListener("selectionchange", this._onEdgeSelectionChange);
 }
 
 /**
@@ -8190,13 +8147,6 @@ removeEdgeDragListeners() {
   this._onEdgeMouseDown = undefined;
   this._onEdgeMouseUp = undefined;
   this._onEdgeMouseMove = undefined;
-
-  this.document.removeEventListener("mousedown", this._onRealMouseDown);
-  this.document.removeEventListener("mouseup", this._onRealMouseUp);
-  this.document.removeEventListener("selectionchange", this._onEdgeSelectionChange);
-  this._onRealMouseDown = undefined;
-  this._onRealMouseUp = undefined;
-  this._onEdgeSelectionChange = undefined;
 }
 
 /**
@@ -8302,70 +8252,6 @@ _advanceSelectionEdge() {
     }
     this._autoAdvancing = false;
   }, 60);
-}
-
-/**
- * Touch variant: request a page advance, remembering the fixed anchor
- * (start of the range) so we can extend once the next page is shown.
- * @private
- */
-_advanceSelectionEdgeTouch(range, lastRect) {
-  if (this._autoAdvancing) return;
-
-  this._touchAnchor = {
-    node: range.startContainer,
-    offset: range.startOffset
-  };
-  this._touchLastRect = { left: lastRect.left, right: lastRect.right };
-
-  this._autoAdvancing = true;
-  this.emit("selection:edge", { direction: "next", touch: true });
-}
-
-/**
- * Called by Rendition after it tried to advance the column.
- * @param {boolean} advanced whether the page actually moved
- * @param {number} delta scroll distance of one page/spread in px
- * @private
- */
-finishTouchEdgeAdvance(advanced, delta) {
-  if (!advanced || !this._touchAnchor) {
-    this._autoAdvancing = false;
-    return;
-  }
-
-  setTimeout(() => {
-    try {
-      const doc = this.document;
-      const rtl = this.documentElement.style["direction"] === "rtl";
-      // Same spot, one page over (iframe coordinates), near the top of the new page
-      const x = this._touchLastRect.left + (rtl ? -delta : delta);
-      const y = 30;
-
-      let focus;
-      if (doc.caretRangeFromPoint) {
-        const r = doc.caretRangeFromPoint(x, y);
-        if (r) focus = { node: r.startContainer, offset: r.startOffset };
-      } else if (doc.caretPositionFromPoint) {
-        const p = doc.caretPositionFromPoint(x, y);
-        if (p) focus = { node: p.offsetNode, offset: p.offset };
-      }
-
-      if (focus) {
-        const sel = this.window.getSelection();
-        const r2 = doc.createRange();
-        r2.setStart(this._touchAnchor.node, this._touchAnchor.offset);
-        r2.setEnd(focus.node, focus.offset);
-        sel.removeAllRanges();
-        sel.addRange(r2);
-        this._prevSelLen = sel.toString().length;
-      }
-    } catch (e) {
-      console.warn("epub.js: touch edge-advance selection failed", e);
-    }
-    this._touchAnchor = undefined;
-    this._autoAdvancing = false;
-  }, 80);
 }
 
   /**
@@ -10919,15 +10805,9 @@ class rendition_Rendition {
    */
   handleSelectionEdge(data, contents) {
     if (!this.manager || typeof this.manager.advanceColumn !== "function") {
-      if (data && data.touch) contents.finishTouchEdgeAdvance(false);
       return;
     }
-
-    const advanced = this.manager.advanceColumn();
-
-    if (data && data.touch) {
-      contents.finishTouchEdgeAdvance(advanced, this.manager.layout.delta);
-    }
+    this.manager.advanceColumn();
   }
   
   /**
