@@ -8136,28 +8136,36 @@ class Contents {
     this._onEdgeMouseMove = undefined;
   }
 
-  /**
-   * NEW: Called on mousemove while a selection drag is active.
-   * If the pointer is near the trailing edge of the visible column,
-   * ask the Rendition/Manager to shift to the next column, then
-   * restore the in-progress selection (same document, so the DOM
-   * nodes are still valid — only their visual offset changed).
+    /**
+   * FIXED: Called on mousemove while a selection drag is active.
+   * With standard single-column-per-page pagination, text flows
+   * top-to-bottom within the visible column, so the point where
+   * the next page's content should be pulled in is the BOTTOM
+   * of the viewport, not the right edge — the right edge is only
+   * relevant if columnWidth < viewport width (a rare/custom setup).
    * @private
    */
   checkEdgeAutoAdvance(event) {
     if (!this._dragging || this._autoAdvancing || !this.window) return;
 
-    const threshold = 24; // px from the right edge
+    const threshold = 24; // px from the edge
     const clientX = event.touches ? event.touches[0].clientX : event.clientX;
-    if (typeof clientX !== "number") return;
+    const clientY = event.touches ? event.touches[0].clientY : event.clientY;
+    if (typeof clientY !== "number") return;
 
-    const atTrailingEdge = clientX > (this.window.innerWidth - threshold);
-    if (!atTrailingEdge) return;
+    // Primary trigger: bottom of the viewport (top-to-bottom column flow)
+    const atBottomEdge = clientY > (this.window.innerHeight - threshold);
+
+    // Secondary trigger: right edge, in case columns are narrower
+    // than the full viewport (e.g. a two-up spread layout)
+    const atRightEdge = typeof clientX === "number" &&
+      clientX > (this.window.innerWidth - threshold);
+
+    if (!atBottomEdge && !atRightEdge) return;
 
     const sel = this.window.getSelection();
     if (!sel || sel.rangeCount === 0) return;
 
-    // Save the live selection endpoints before triggering the page shift
     const anchorNode = sel.anchorNode;
     const anchorOffset = sel.anchorOffset;
     const focusNode = sel.focusNode;
@@ -8165,12 +8173,8 @@ class Contents {
 
     this._autoAdvancing = true;
 
-    // Let the Rendition/Manager decide whether a column shift is possible
-    // (it will refuse if this would cross a section/chapter boundary).
     this.emit("selection:edge", { direction: "next" });
 
-    // Give the manager's scroll/transform a tick to apply, then
-    // re-establish the selection range from the saved endpoints.
     setTimeout(() => {
       try {
         const sel2 = this.window.getSelection();
