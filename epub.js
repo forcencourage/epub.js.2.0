@@ -8068,10 +8068,6 @@ class Contents {
       clearTimeout(this.selectionEndTimeout);
     }
 
-    // Touch / selection-handle path: browser UI may not send touchmove on the document.
-    // Detect trailing-edge selection the same way as drag-to-edge.
-    this._checkSelectionEdgeFromSelection();
-
     this.selectionEndTimeout = setTimeout(function () {
       var selection = this.window.getSelection();
       this.triggerSelectedEvent(selection);
@@ -8159,14 +8155,7 @@ removeEdgeDragListeners() {
  * @private
  */
 _updatePointer(event) {
-  let point = null;
-  if (event.touches && event.touches.length) {
-    point = event.touches[0];
-  } else if (event.changedTouches && event.changedTouches.length) {
-    point = event.changedTouches[0];
-  } else {
-    point = event;
-  }
+  const point = event.touches ? event.touches[0] : event;
   if (point && typeof point.clientX === "number") {
     this._lastPointer = { x: point.clientX, y: point.clientY };
   }
@@ -8263,61 +8252,6 @@ _advanceSelectionEdge() {
     }
     this._autoAdvancing = false;
   }, 60);
-}
-
-
-/**
- * When the user extends a selection with native touch handles (no document
- * touchmove), use the selection end geometry to decide whether to advance
- * one page — same arming rules as pointer edge-drag (one advance per visit).
- * @private
- */
-_checkSelectionEdgeFromSelection() {
-  if (!this.window || this._autoAdvancing) return;
-
-  const sel = this.window.getSelection();
-  if (!sel || sel.rangeCount === 0 || sel.isCollapsed) {
-    this._edgeArmed = true;
-    return;
-  }
-
-  try {
-    const range = sel.getRangeAt(0);
-    const endRange = range.cloneRange();
-    endRange.collapse(false);
-
-    const rects = endRange.getClientRects();
-    const rect = rects.length
-      ? rects[rects.length - 1]
-      : endRange.getBoundingClientRect();
-
-    if (!rect || (rect.width === 0 && rect.height === 0)) return;
-
-    const threshold = 24;
-    const atBottomEdge = rect.bottom >= (this.window.innerHeight - threshold);
-    const atRightEdge =
-      typeof rect.right === "number" &&
-      rect.right >= (this.window.innerWidth - threshold);
-
-    if (!atBottomEdge && !atRightEdge) {
-      this._edgeArmed = true;
-      return;
-    }
-
-    if (!this._edgeArmed) return;
-
-    this._edgeArmed = false;
-
-    // Point used after column advance to re-extend the focus end of the range.
-    this._lastPointer = {
-      x: Math.min(Math.max(rect.right - 1, 0), this.window.innerWidth - 1),
-      y: Math.min(Math.max(rect.bottom - 1, 0), this.window.innerHeight - 1)
-    };
-
-    this._advanceSelectionEdge();
-  } catch (e) {
-    // ignore invalid ranges during rapid selection updates
-  }
 }
 
   /**
