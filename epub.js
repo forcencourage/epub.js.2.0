@@ -8105,16 +8105,16 @@ addEdgeDragListeners() {
 
   this._dragging = false;
   this._autoAdvancing = false;
-  this._edgeAdvanceInterval = undefined;
+  this._edgeArmed = true; // NEW: allows exactly one auto-advance per edge visit
   this._lastPointer = { x: 0, y: 0 };
 
   this._onEdgeMouseDown = (e) => {
     this._dragging = true;
+    this._edgeArmed = true; // NEW: re-arm at the start of every new selection drag
     this._updatePointer(e);
   };
   this._onEdgeMouseUp = () => {
     this._dragging = false;
-    this._stopEdgeAdvanceLoop();
   };
   this._onEdgeMouseMove = (e) => {
     this._updatePointer(e);
@@ -8136,8 +8136,6 @@ addEdgeDragListeners() {
  */
 removeEdgeDragListeners() {
   if (!this.document) return;
-
-  this._stopEdgeAdvanceLoop();
 
   this.document.removeEventListener("mousedown", this._onEdgeMouseDown);
   this.document.removeEventListener("mouseup", this._onEdgeMouseUp);
@@ -8184,43 +8182,21 @@ checkEdgeAutoAdvance() {
     clientX > (this.window.innerWidth - threshold);
 
   if (!atBottomEdge && !atRightEdge) {
-    this._stopEdgeAdvanceLoop();
+    // Pointer left the edge zone (e.g. you moved up to start highlighting
+    // on the new page) - allow exactly one more auto-advance next time
+    // the pointer re-enters the edge zone.
+    this._edgeArmed = true;
     return;
   }
 
-  this._startEdgeAdvanceLoop();
-}
-
-/**
- * Begin (or continue) the repeating advance while the pointer
- * remains near the edge, so holding still at the bottom of the
- * page still keeps pulling in new pages/text.
- * @private
- */
-_startEdgeAdvanceLoop() {
-  if (this._edgeAdvanceInterval) return;
-
-  const tick = () => {
-    if (!this._dragging) {
-      this._stopEdgeAdvanceLoop();
-      return;
-    }
-    this._advanceSelectionEdge();
-  };
-
-  tick();
-  this._edgeAdvanceInterval = setInterval(tick, 200);
-}
-
-/**
- * Stop the repeating advance loop.
- * @private
- */
-_stopEdgeAdvanceLoop() {
-  if (this._edgeAdvanceInterval) {
-    clearInterval(this._edgeAdvanceInterval);
-    this._edgeAdvanceInterval = undefined;
+  if (!this._edgeArmed) {
+    // Already advanced once for this edge visit; do nothing until the
+    // pointer leaves the zone or a new drag starts.
+    return;
   }
+
+  this._edgeArmed = false;
+  this._advanceSelectionEdge();
 }
 
 /**
