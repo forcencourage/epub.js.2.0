@@ -5827,6 +5827,9 @@ class default_DefaultViewManager {
    * @return {boolean} whether the shift happened
    */
   advanceColumn() {
+
+    console.log("advanceColumn called", Date.now());
+
     if (!this.canAdvanceColumn()) return false;
 
     if (this.settings.axis === "vertical") {
