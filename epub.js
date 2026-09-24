@@ -5768,6 +5768,27 @@ class default_DefaultViewManager {
   // };
 
     /**
+   * NEW: While a selection drag is active, pin the container's scroll
+   * position so browser autoscroll can't push the view further.
+   */
+  beginSelectionDrag() {
+    if (this.settings.fullsize) return;
+    this._selectionLock = { left: this.container.scrollLeft };
+    if (!this._onDragWindowUp) {
+      this._onDragWindowUp = () => this.endSelectionDrag();
+      window.addEventListener("mouseup", this._onDragWindowUp);
+    }
+  }
+
+  endSelectionDrag() {
+    this._selectionLock = null;
+    if (this._onDragWindowUp) {
+      window.removeEventListener("mouseup", this._onDragWindowUp);
+      this._onDragWindowUp = null;
+    }
+  }
+
+    /**
    * NEW: Whether the current section has another column visible
    * without needing to load the next spine item.
    * @return {boolean}
@@ -5812,6 +5833,11 @@ class default_DefaultViewManager {
       this.scrollBy(0, this.layout.height, true);
     } else {
       this.scrollBy(this.layout.delta, 0, true);
+    }
+
+    // NEW: the lock now points at the new page
+    if (this._selectionLock && !this.settings.fullsize) {
+      this._selectionLock.left = this.container.scrollLeft;
     }
 
     return true;
@@ -6209,6 +6235,15 @@ class default_DefaultViewManager {
   }
 
   onScroll() {
+
+    // NEW: revert any scroll that isn't ours while dragging a selection
+    if (this._selectionLock && !this.settings.fullsize &&
+        Math.abs(this.container.scrollLeft - this._selectionLock.left) > 1) {
+      this.ignore = true;
+      this.container.scrollLeft = this._selectionLock.left;
+      return;
+    }
+    
     let scrollTop;
     let scrollLeft;
 
@@ -8105,16 +8140,19 @@ addEdgeDragListeners() {
 
   this._dragging = false;
   this._autoAdvancing = false;
-  this._edgeArmed = true; // NEW: allows exactly one auto-advance per edge visit
+  this._edgeArmed = true;
+  this._lastAdvanceAt = 0;                 // NEW: cooldown timestamp
   this._lastPointer = { x: 0, y: 0 };
 
   this._onEdgeMouseDown = (e) => {
     this._dragging = true;
-    this._edgeArmed = true; // NEW: re-arm at the start of every new selection drag
+    this._edgeArmed = true;
     this._updatePointer(e);
+    this.emit("selection:dragstart");      // NEW: lets the manager lock scroll
   };
   this._onEdgeMouseUp = () => {
     this._dragging = false;
+    this.emit("selection:dragend");        // NEW
   };
   this._onEdgeMouseMove = (e) => {
     this._updatePointer(e);
@@ -8124,7 +8162,6 @@ addEdgeDragListeners() {
   this.document.addEventListener("mousedown", this._onEdgeMouseDown);
   this.document.addEventListener("mouseup", this._onEdgeMouseUp);
   this.document.addEventListener("mousemove", this._onEdgeMouseMove);
-  // Touch support (basic)
   this.document.addEventListener("touchstart", this._onEdgeMouseDown);
   this.document.addEventListener("touchend", this._onEdgeMouseUp);
   this.document.addEventListener("touchmove", this._onEdgeMouseMove);
@@ -8173,29 +8210,33 @@ _updatePointer(event) {
 checkEdgeAutoAdvance() {
   if (!this._dragging || !this.window) return;
 
-  const threshold = 24; // px from the edge
+  const threshold = 24;                    // enter zone
+  const rearmDistance = 90;                // NEW: must move this far out to re-arm
+  const cooldown = 700;                    // NEW: ms between advances
   const { x: clientX, y: clientY } = this._lastPointer;
   if (typeof clientY !== "number") return;
 
-  const atBottomEdge = clientY > (this.window.innerHeight - threshold);
-  const atRightEdge = typeof clientX === "number" &&
-    clientX > (this.window.innerWidth - threshold);
+  const bottomDist = this.window.innerHeight - clientY;
+  const rightDist = this.window.innerWidth - clientX;
 
-  if (!atBottomEdge && !atRightEdge) {
-    // Pointer left the edge zone (e.g. you moved up to start highlighting
-    // on the new page) - allow exactly one more auto-advance next time
-    // the pointer re-enters the edge zone.
+  const inZone = bottomDist < threshold ||
+    (typeof clientX === "number" && rightDist < threshold);
+  const farFromEdge = bottomDist > rearmDistance &&
+    (typeof clientX !== "number" || rightDist > rearmDistance);
+
+  // Only re-arm once the pointer is clearly away from the edge
+  if (farFromEdge) {
     this._edgeArmed = true;
     return;
   }
 
-  if (!this._edgeArmed) {
-    // Already advanced once for this edge visit; do nothing until the
-    // pointer leaves the zone or a new drag starts.
-    return;
-  }
+  if (!inZone || !this._edgeArmed) return;
+
+  // Cooldown: ignore anything right after an advance
+  if (Date.now() - this._lastAdvanceAt < cooldown) return;
 
   this._edgeArmed = false;
+  this._lastAdvanceAt = Date.now();
   this._advanceSelectionEdge();
 }
 
@@ -10795,7 +10836,9 @@ class rendition_Rendition {
       contents.on(e, ev => this.triggerViewEvent(ev, contents));
     });
     contents.on(constants["c" /* EVENTS */].CONTENTS.SELECTED, e => this.triggerSelectedEvent(e, contents));
-    contents.on("selection:edge", data => this.handleSelectionEdge(data, contents)); // NEW
+    contents.on("selection:edge", data => this.handleSelectionEdge(data, contents));
+    contents.on("selection:dragstart", () => this.manager.beginSelectionDrag && this.manager.beginSelectionDrag()); // NEW
+    contents.on("selection:dragend", () => this.manager.endSelectionDrag && this.manager.endSelectionDrag());       // NEW
   }
 
   /**
