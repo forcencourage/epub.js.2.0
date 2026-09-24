@@ -5828,8 +5828,6 @@ class default_DefaultViewManager {
    */
   advanceColumn() {
 
-    console.log("advanceColumn called", Date.now());
-
     if (!this.canAdvanceColumn()) return false;
 
     if (this.settings.axis === "vertical") {
